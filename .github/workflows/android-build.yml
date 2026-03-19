@@ -1,0 +1,79 @@
+name: Build .NET MAUI Android App (.aab, .apk)
+
+on:
+  # Allow manual execution from the GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    # MAUI Android builds require Windows due to MSBuild and Android SDK
+    runs-on: windows-latest
+
+    env:
+      # Path to your .NET MAUI project file
+      PROJECT_PATH: src/MyAwesomeMauiApp/MyAwesomeMauiApp.csproj
+
+    steps:  
+      # Checkout the source code from the repository
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Install the SDK version pinned in global.json
+      - name: Setup .NET from global.json
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      # Install the required MAUI workload for 
+      # building Android apps
+      - name: Install MAUI Workload
+        run: dotnet workload install maui
+
+      # Decode the base64-encoded keystore from 
+      # GitHub Secrets and save it to a file
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | Out-File -Encoding ascii -FilePath myapp.keystore.b64
+          certutil -decode myapp.keystore.b64 myapp.keystore
+
+      # Generate a display version (e.g. "1.0.42") and 
+      # an internal version code (e.g. "10042")
+      - name: Set version variables
+        run: |          
+          $buildNumber = "${{ github.run_number }}"
+          echo "VERSION_DISPLAY=1.0.$buildNumber" >> $env:GITHUB_ENV
+          echo "VERSION_CODE=$((10000 + $buildNumber))" >> $env:GITHUB_ENV
+
+      # Restore all NuGet dependencies
+      - name: Restore NuGet packages
+        run: dotnet restore "$env:PROJECT_PATH"
+
+      # Build the .NET MAUI Android app as a signed 
+      # AAB/APK file in Release mode
+      - name: Build (Release)
+        run: |
+          dotnet publish "$env:PROJECT_PATH" -f net10.0-android -c Release `
+            -p:ApplicationVersion="$env:VERSION_CODE" `
+            -p:ApplicationDisplayVersion="$env:VERSION_DISPLAY" `
+            -p:AndroidSigningKeyAlias="${{ secrets.ANDROID_KEY_ALIAS }}" `
+            -p:AndroidSigningKeyPass="${{ secrets.ANDROID_KEY_PASSWORD }}" `
+            -p:AndroidSigningStorePass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" `
+            -p:AndroidSigningStore=myapp.keystore
+
+      # Copy all .aab and .apk files to an 'output' folder 
+      # to avoid nested paths in the final artifact
+      - name: Copy .aab and .apk to output
+        run: |        
+          $destination = "$(pwd)\output"
+          mkdir $destination
+          $files = Get-ChildItem -Recurse -Include *.aab,*.apk
+          foreach ($file in $files) {
+            Copy-Item $file.FullName -Destination $destination -Force
+          }
+
+      - name: Upload final AAB and APK only
+        uses: actions/upload-artifact@v7
+        with:
+          # Name of the uploaded artifact
+          name: android-build
+          path: output
