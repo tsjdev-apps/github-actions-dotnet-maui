@@ -1,0 +1,102 @@
+name: Build .NET MAUI iOS App (.ipa)
+
+on:
+  # Manual trigger via GitHub UI
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-26
+
+    env:
+      # Path to your .NET MAUI project file
+      PROJECT_PATH: src/MyAwesomeMauiApp/MyAwesomeMauiApp.csproj
+
+    steps:
+      # Checkout the source code
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Install the SDK version pinned in global.json
+      - name: Setup .NET from global.json
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      
+      # Pin Xcode 26.2 explicitly because .NET 10.0.200 officially supports this version
+      - name: Select Xcode 26.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcode-select -p
+
+      # Install the .NET MAUI workload
+      - name: Install MAUI Workload
+        run: dotnet workload install maui
+
+      # Import the P12 certificate from secrets (base64 encoded)
+      - name: Import P12 File
+        uses: apple-actions/import-codesign-certs@v6
+        with: 
+          p12-file-base64: ${{ secrets.IOS_P12_BASE64 }}
+          p12-password: ${{ secrets.IOS_P12_PASSWORD }}
+          keychain: build
+          create-keychain: true
+          keychain-password: buildpass
+
+      # Activate and unlock the new build.keychain
+      - name: Activate build.keychain
+        run: |
+          security list-keychains -s ~/Library/Keychains/build.keychain-db
+          security default-keychain -s ~/Library/Keychains/build.keychain-db
+          security unlock-keychain -p buildpass ~/Library/Keychains/build.keychain-db
+
+      # Extract the Apple Distribution identity dynamically
+      - name: Extract signing identity
+        run: |
+          identity=$(security find-identity -v -p codesigning | grep "Apple Distribution" | head -n 1 | awk -F\" '{print $2}')
+          echo "CODE_SIGN_IDENTITY=$identity" >> $GITHUB_ENV
+
+      # Download provisioning profiles from Apple using App Store Connect credentials
+      - name: Download Provisioning Profiles
+        uses: apple-actions/download-provisioning-profiles@v5
+        with:
+          bundle-id: ${{ secrets.IOS_BUNDLE_ID }}
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          api-key-id: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          api-private-key: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+    
+      # Set version information dynamically based on the GitHub Actions run number
+      - name: Set version variables
+        run: |          
+          buildNumber="${{ github.run_number }}"
+          echo "VERSION_DISPLAY=1.0.$buildNumber" >> $GITHUB_ENV
+          echo "VERSION_CODE=$((10000 + buildNumber))" >> $GITHUB_ENV
+
+      # Restore NuGet packages
+      - name: Restore packages
+        run: dotnet restore "$PROJECT_PATH"
+
+      # Build and publish the iOS .ipa using the dynamically extracted code sign identity
+      - name: Publish iOS app
+        run: |
+          dotnet publish "$PROJECT_PATH" -f net10.0-ios -c Release \
+            -p:ApplicationVersion="$VERSION_CODE" \
+            -p:ApplicationDisplayVersion="$VERSION_DISPLAY" \
+            -p:ApplicationId="${{ secrets.IOS_BUNDLE_ID }}" \
+            -p:CodesignKey="$CODE_SIGN_IDENTITY"
+
+      # Find and copy the resulting .ipa file to a known output directory
+      - name: Copy .ipa to output
+        run: |
+          mkdir -p output
+          find . -name "*.ipa" -exec cp {} output/ \;
+
+      # Upload the final .ipa file as an artifact
+      - name: Upload final IPA only
+        uses: actions/upload-artifact@v6
+        with:
+          # Name of the uploaded artifact
+          name: ios-build
+          # Upload only the content of the output folder
+          path: output
